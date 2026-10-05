@@ -12,12 +12,12 @@ def verifyInvariance_run(f1="test_1.npz", f2="test_2.npz", fs=30, active_sub=10)
         print(f"[-] Missing: {p1} or {p2}")
         return
 
-    d1, d2 = np.load(p1)['phases'], np.load(p2)['phases']
+    d1, d2 = np.load(p1)['amps'], np.load(p2)['amps']
     print(f"[+] Loaded {f1} {d1.shape} | {f2} {d2.shape}")
 
     core = PhaseBeatCore(fs=fs, lowcut=0.1, highcut=2.0, top_k=5)
-    s1 = core.pbCore_process(d1)
-    s2 = core.pbCore_process(d2)
+    s1 = core.process(d1)
+    s2 = core.process(d2)
 
     dc_raw_diff = abs(np.mean(d1[:, active_sub]) - np.mean(d2[:, active_sub]))
     dc_out_diff = abs(np.mean(s1) - np.mean(s2))
@@ -38,14 +38,14 @@ def verifyInvariance_run(f1="test_1.npz", f2="test_2.npz", fs=30, active_sub=10)
     plt.subplot(2, 1, 1)
     plt.plot(d1[:min_len, active_sub], label=f"{f1} (Sub {active_sub})", alpha=0.8)
     plt.plot(d2[:min_len, active_sub], label=f"{f2} (Sub {active_sub})", alpha=0.8)
-    plt.title(f"Raw Phases Comparison (Subcarrier {active_sub} - Different DC Levels)")
+    plt.title(f"Raw CSI Amplitude Comparison (Subcarrier {active_sub})")
     plt.legend(loc='upper right')
     plt.grid(True, alpha=0.3)
 
     plt.subplot(2, 1, 2)
     plt.plot(s1[:min_len], label=f"{f1} (Clean)", color='red', linewidth=1.5)
     plt.plot(s2[:min_len], label=f"{f2} (Clean)", color='blue', linewidth=1.2, linestyle='--')
-    plt.title("PhaseBeat Normalized Waveforms (Zero-Mean Across Environments)")
+    plt.title("Selected Respiration-Band CSI Amplitude")
     plt.legend(loc='upper right')
     plt.grid(True, alpha=0.3)
 
