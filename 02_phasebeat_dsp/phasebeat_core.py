@@ -24,7 +24,7 @@ class PhaseBeatCore:
         self,
         fs: float = 75.5,
         lowcut: float = 0.1,
-        highcut: float = 3.0,
+        highcut: float = 0.75,
         filter_order: int = 2,
         top_k: int = 3,
         spike_window_seconds: float = 0.3,

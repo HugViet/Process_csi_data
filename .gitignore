@@ -1,0 +1,34 @@
+# Python bytecode and interpreter artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test, type-checker, and linter caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build outputs
+build/
+dist/
+
+# Logs and operating-system files
+*.log
+.DS_Store
+Thumbs.db
+
+# Generated source bundle (can be recreated by the export skill)
+/code.md
+
+# Generated project outputs and local CSI recordings
+/data/raw/
+/data/processed/
+/data/weights/
