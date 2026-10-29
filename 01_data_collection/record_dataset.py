@@ -6,7 +6,10 @@ from serial_reader import CSISerialReader
 
 def recordDataset_start():
     session_name = input("Session name (default: test_precise): ").strip() or "test_precise"
-    duration = int(input("Duration (s, default: 20): ").strip() or 20)
+    try:
+        duration = int(input("Duration (s, default: 20): ").strip() or 20)
+    except ValueError:
+        duration = 20
     reader = CSISerialReader()
     reader.serialReader_connect()
     
@@ -23,6 +26,8 @@ def recordDataset_start():
                 timestamps.append(time.time() - start_t)
                 pkts += 1
                 if pkts % 100 == 0: print(f"-> Pkts: {pkts} | Time: {timestamps[-1]:.1f}s")
+            else:
+                time.sleep(0.001)
     except KeyboardInterrupt: print("\n[!] Stopped")
     finally: reader.serialReader_close()
 

@@ -1,4 +1,4 @@
-"""Compare raw CSI amplitudes and DSP-cleaned signals across recordings."""
+"""Compare raw CSI and DSP-cleaned signals across recordings (amplitude or phase)."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config.settings import RAW_DATA_DIR  # noqa: E402
 from phasebeat_core import PhaseBeatCore  # noqa: E402
+from utils import load_csi_recording  # noqa: E402
 
 
 DEFAULT_FILES = [f"test_{index}.npz" for index in range(1, 5)]
@@ -28,50 +28,41 @@ class ProcessedRecord:
 
     name: str
     time: NDArray[np.float64]
-    raw_amplitude: NDArray[np.float64]
+    raw_signal: NDArray[np.float64]
     clean_signal: NDArray[np.float64]
     sampling_rate: float
     selected_subcarrier: int
+    mode: str
 
 
-def load_and_process(file_name: str) -> ProcessedRecord:
+def load_and_process(file_name: str, mode: str = "phase") -> ProcessedRecord:
     """Load one NPZ capture, run the DSP pipeline, and keep its chosen carrier."""
-    path = RAW_DATA_DIR / file_name
-    if not path.is_file():
-        raise FileNotFoundError(f"Recording not found: {path}")
+    rec = load_csi_recording(file_name)
 
-    with np.load(path) as archive:
-        if "amps" not in archive or "times" not in archive:
-            raise KeyError(f"{file_name} must contain both 'amps' and 'times'")
-        amplitudes = np.asarray(archive["amps"], dtype=np.float64)
-        timestamps = np.asarray(archive["times"], dtype=np.float64)
+    if mode == "phase" and rec.phases is None:
+        print(f"[!] {rec.name}: No 'phases' in file, falling back to amplitude mode")
+        mode = "amplitude"
 
-    if amplitudes.ndim != 2 or amplitudes.shape[0] < 2:
-        raise ValueError(f"{file_name}: 'amps' must be a samples-by-subcarriers matrix")
-    if timestamps.ndim != 1 or timestamps.size != amplitudes.shape[0]:
-        raise ValueError(f"{file_name}: 'times' length must match the amplitude sample count")
-    if not np.all(np.isfinite(timestamps)) or np.any(np.diff(timestamps) < 0):
-        raise ValueError(f"{file_name}: timestamps must be finite and non-decreasing")
-
-    elapsed = float(timestamps[-1] - timestamps[0])
-    if elapsed <= 0:
-        raise ValueError(f"{file_name}: timestamps do not span a positive duration")
-    fs = (timestamps.size - 1) / elapsed
-
-    core = PhaseBeatCore(fs=fs, lowcut=0.1, highcut=0.75)
-    clean_signal = core.process(amplitudes)
+    core = PhaseBeatCore(fs=rec.fs, lowcut=0.1, highcut=0.75, mode=mode)
+    clean_signal = core.process(rec.amplitudes, phases=rec.phases)
     selected = core.last_selected_subcarrier
     if selected is None:
-        raise RuntimeError(f"{file_name}: pipeline did not select a subcarrier")
+        raise RuntimeError(f"{rec.name}: pipeline did not select a subcarrier")
 
-    relative_time = timestamps - timestamps[0]
+    # For the raw signal view, show the selected subcarrier from the source data.
+    if mode == "phase" and rec.phases is not None:
+        raw_signal = rec.phases[:, selected]
+    else:
+        raw_signal = rec.amplitudes[:, selected]
+
     return ProcessedRecord(
-        name=file_name,
-        time=relative_time,
-        raw_amplitude=amplitudes[:, selected],
+        name=rec.name,
+        time=rec.relative_time,
+        raw_signal=raw_signal,
         clean_signal=clean_signal,
-        sampling_rate=fs,
+        sampling_rate=rec.fs,
         selected_subcarrier=selected,
+        mode=mode,
     )
 
 
@@ -85,7 +76,7 @@ def _shape_normalize(signal: NDArray[np.float64]) -> NDArray[np.float64]:
 
 
 def plot_comparison(records: list[ProcessedRecord]) -> None:
-    """Plot raw selected-carrier amplitudes and normalized cleaned traces together."""
+    """Plot raw selected-carrier signals and normalized cleaned traces together."""
     figure, (ax_raw, ax_clean) = plt.subplots(
         2,
         1,
@@ -95,12 +86,14 @@ def plot_comparison(records: list[ProcessedRecord]) -> None:
     )
     palette = plt.get_cmap("tab10")
 
+    mode_label = records[0].mode.capitalize() if records else "Signal"
+
     for index, record in enumerate(records):
         color = palette(index % 10)
         label = f"{record.name} | SC {record.selected_subcarrier}"
         ax_raw.plot(
             record.time,
-            record.raw_amplitude,
+            record.raw_signal,
             color=color,
             alpha=0.8,
             linewidth=1.0,
@@ -115,14 +108,14 @@ def plot_comparison(records: list[ProcessedRecord]) -> None:
             label=label,
         )
 
-    ax_raw.set_title("Raw CSI amplitude — selected subcarrier per recording")
-    ax_raw.set_ylabel("Raw amplitude")
+    ax_raw.set_title(f"Raw CSI {mode_label} — selected subcarrier per recording")
+    ax_raw.set_ylabel(f"Raw {mode_label}")
     ax_raw.grid(True, alpha=0.3)
     ax_raw.legend(loc="upper right", fontsize=8)
 
-    ax_clean.set_title("DSP output — shape comparison (each trace normalized to unit standard deviation)")
+    ax_clean.set_title(f"DSP output [{mode_label}] — shape comparison (normalized)")
     ax_clean.set_xlabel("Time from recording start (s)")
-    ax_clean.set_ylabel("Normalized filtered amplitude")
+    ax_clean.set_ylabel(f"Normalized filtered {mode_label}")
     ax_clean.axhline(0.0, color="black", linewidth=0.7, alpha=0.5)
     ax_clean.grid(True, alpha=0.3)
     ax_clean.legend(loc="upper right", fontsize=8)
@@ -132,22 +125,24 @@ def plot_comparison(records: list[ProcessedRecord]) -> None:
 
 
 def main() -> None:
-    """Process five recordings at once and display comparison plots."""
+    """Process recordings and display comparison plots."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "files",
         nargs="*",
         default=DEFAULT_FILES,
-        help="Five NPZ filenames under data/raw (default: test_1.npz through test_5.npz)",
+        help="NPZ filenames under data/raw (default: test_1 through test_4)",
+    )
+    parser.add_argument(
+        "--mode", choices=["phase", "amplitude"], default="phase",
+        help="Processing mode: 'phase' (default) or 'amplitude'",
     )
     args = parser.parse_args()
-    # if len(args.files) != 2:
-    #     parser.error(f"expected exactly five recordings, received {len(args.files)}")
 
-    records = [load_and_process(file_name) for file_name in args.files]
+    records = [load_and_process(file_name, mode=args.mode) for file_name in args.files]
     for record in records:
         print(
-            f"File: {record.name} | Fs: {record.sampling_rate:.2f} Hz | "
+            f"File: {record.name} | Mode: {record.mode} | Fs: {record.sampling_rate:.2f} Hz | "
             f"Selected subcarrier: {record.selected_subcarrier}"
         )
     plot_comparison(records)

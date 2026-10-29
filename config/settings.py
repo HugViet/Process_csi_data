@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -8,7 +9,8 @@ WEIGHTS_DIR = DATA_DIR / "weights"
 
 RAW_DATA_DIR.mkdir(parents=True, exist_ok=True)
 PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
+WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
-SERIAL_PORT = 'COM3'
-BAUD_RATE = 921600
+SERIAL_PORT = os.getenv("CSI_SERIAL_PORT", "COM3")
+BAUD_RATE = int(os.getenv("CSI_BAUD_RATE", 921600))
 NUM_SUBCARRIERS = 64
