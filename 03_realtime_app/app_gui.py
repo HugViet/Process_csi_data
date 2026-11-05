@@ -62,21 +62,57 @@ class RealtimeDashboard:
     def _init_info_panel(self) -> None:
         self.ax_info.set_facecolor("#181c24")
         self.ax_info.axis("off")
+
+        # Left Column: System & Branding
         self.text_title = self.ax_info.text(
-            0.02, 0.7, "CSI VITAL SIGN SENSING", color="#ffffff",
-            fontsize=13, fontweight="bold", va="center"
+            0.015, 0.72, "CSI RESPIRATION MONITOR", color="#ffffff",
+            fontsize=12, fontweight="bold", va="center"
+        )
+        self.text_subtitle = self.ax_info.text(
+            0.015, 0.40, "Dual-Pipeline: DSP + BiLSTM", color="#8892b0",
+            fontsize=8.5, va="center"
+        )
+        self.text_rec_tag = self.ax_info.text(
+            0.015, 0.12, "⚪ Standby", color="#a4b0be",
+            fontsize=9, fontweight="bold", va="center"
+        )
+
+        # Center-Left Column: DSP Vital Sign Estimate
+        self.text_dsp_label = self.ax_info.text(
+            0.32, 0.82, "DSP ESTIMATION", color="#8892b0",
+            fontsize=8.5, fontweight="bold", va="center", ha="center"
         )
         self.text_bpm = self.ax_info.text(
-            0.42, 0.5, "-- BPM", color="#00ffcc",
-            fontsize=26, fontweight="bold", va="center", ha="center"
+            0.32, 0.48, "-- BPM", color="#00ffcc",
+            fontsize=24, fontweight="bold", va="center", ha="center"
         )
         self.text_status = self.ax_info.text(
-            0.42, 0.12, "[INITIALIZING]", color="#ffaa00",
-            fontsize=11, fontweight="bold", va="center", ha="center"
+            0.32, 0.14, "[INITIALIZING]", color="#ffaa00",
+            fontsize=9.5, fontweight="bold", va="center", ha="center"
         )
+
+        # Center-Right Column: Deep Learning AI Prediction
+        self.text_ai_label = self.ax_info.text(
+            0.57, 0.82, "AI MODEL (1D-CNN + BiLSTM)", color="#8892b0",
+            fontsize=8.5, fontweight="bold", va="center", ha="center"
+        )
+        self.text_ai_state = self.ax_info.text(
+            0.57, 0.48, "--", color="#00ffcc",
+            fontsize=18, fontweight="bold", va="center", ha="center"
+        )
+        self.text_ai_bpm = self.ax_info.text(
+            0.57, 0.14, "AI BPM: --", color="#cccccc",
+            fontsize=9.5, va="center", ha="center"
+        )
+
+        # Right Column: Technical Details & Hotkeys
         self.text_details = self.ax_info.text(
-            0.75, 0.5, "Subcarrier: --\nFs: -- Hz\nMode: Phase\nKeys: [R] Record | [M] Mode | [Q] Quit",
-            color="#cccccc", fontsize=9.5, va="center", family="monospace"
+            0.78, 0.50,
+            "SC: -- | Fs: -- Hz\n"
+            "FFT: -- | Peak: --\n"
+            "Mode: AMPLITUDE\n"
+            "Keys: [R] Rec | [M] Mode",
+            color="#cccccc", fontsize=8.5, va="center", family="monospace"
         )
 
     def _init_wave_panel(self) -> None:
@@ -139,30 +175,64 @@ class RealtimeDashboard:
         if snapshot is None:
             dur, target, pkts = self.engine.get_buffer_status()
             pct = min(99, int((dur / target) * 100)) if target > 0 else 0
-            self.text_bpm.set_text(f"BUFFERING {pct}%")
+            self.text_bpm.set_text(f"BUF {pct}%")
             self.text_bpm.set_color("#8892b0")
-            self.text_status.set_text(f"Collecting: {dur:.1f}s / {target:.1f}s ({pkts} pkts)")
+            self.text_status.set_text(f"{dur:.1f}s / {target:.1f}s ({pkts} pkts)")
             self.text_status.set_color("#ffaa00")
+            self.text_ai_state.set_text("WARMING UP")
+            self.text_ai_state.set_color("#8892b0")
+            self.text_ai_bpm.set_text("Waiting for window...")
             return
 
-        # Update Top Info Panel
+        # Update Top Info Panel: Recording Tag
         rec_tag = f"🔴 REC ({snapshot.recorded_packets} pkts)" if snapshot.is_recording else "⚪ Standby"
+        self.text_rec_tag.set_text(rec_tag)
+        self.text_rec_tag.set_color("#ff4757" if snapshot.is_recording else "#a4b0be")
+
+        # Update DSP Vital Sign
         if snapshot.status == "Apnea":
-            self.text_bpm.set_text("NÍN THỞ (APNEA)")
+            self.text_bpm.set_text("APNEA")
             self.text_bpm.set_color("#ff4757")
-            self.text_status.set_text(f"Status: APNEA (Nín thở) | Energy: {snapshot.variance:.4f} | Rec: {rec_tag}")
+            self.text_status.set_text(f"NÍN THỞ | Var: {snapshot.variance:.4f}")
             self.text_status.set_color("#ff4757")
         else:
             self.text_bpm.set_text(f"{snapshot.bpm:.1f} BPM")
             self.text_bpm.set_color("#00ffcc")
-            self.text_status.set_text(f"Status: BREATHING | Energy: {snapshot.variance:.2f} | SNR: {snapshot.snr:.1f} | Rec: {rec_tag}")
+            self.text_status.set_text(f"BREATHING | SNR: {snapshot.snr:.1f}")
             self.text_status.set_color("#2ed573")
 
+        # Update AI Model Prediction
+        cls_colors = {
+            "apnea": "#ff4757",
+            "slow": "#ffa502",
+            "normal": "#2ed573",
+            "fast": "#00d2d3",
+            "unknown": "#8892b0",
+        }
+        cls_labels = {
+            "apnea": "NÍN THỞ (APNEA)",
+            "slow": "THỞ CHẬM (SLOW)",
+            "normal": "BÌNH THƯỜNG (NORMAL)",
+            "fast": "THỞ NHANH (FAST)",
+            "unknown": "UNKNOWN",
+        }
+        ai_cls = snapshot.ai_class
+        ai_label = cls_labels.get(ai_cls, ai_cls.upper())
+        ai_color = cls_colors.get(ai_cls, "#00ffcc")
+        self.text_ai_state.set_text(f"{ai_label}\n({snapshot.ai_confidence * 100:.1f}%)")
+        self.text_ai_state.set_color(ai_color)
+
+        if ai_cls == "apnea":
+            self.text_ai_bpm.set_text("AI: Zero Respiration")
+        else:
+            self.text_ai_bpm.set_text(f"AI Rate: {snapshot.ai_bpm:.1f} BPM")
+
+        ch_str = f"PCA-PC{snapshot.selected_subcarrier}" if self.engine._subcarrier_auto_select else f"SC {snapshot.selected_subcarrier}"
         self.text_details.set_text(
-            f"Subcarrier: SC {snapshot.selected_subcarrier} (Locked)\n"
-            f"Fs: {snapshot.fs:.1f} Hz ({snapshot.total_packets} pkts)\n"
-            f"Mode: {snapshot.mode.upper()} | FFT: {snapshot.fft_bpm:.1f} | Peak: {snapshot.peak_bpm:.1f}\n"
-            f"Keys: [R] Rec | [M] Mode | [C] Calib | [ [ / ] ] SC"
+            f"Ch: {ch_str} | Fs: {snapshot.fs:.1f}Hz\n"
+            f"Spec: {snapshot.fft_bpm:.1f} | ACF: {snapshot.peak_bpm:.1f}\n"
+            f"Mode: {snapshot.mode.upper()}\n"
+            f"Keys: [R]Rec [M]Mode [C]Cal"
         )
 
         # Update Waveform
@@ -218,8 +288,8 @@ class RealtimeDashboard:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Realtime CSI Breathing Monitoring Dashboard")
     parser.add_argument(
-        "--source", choices=["live", "sim"], default="sim",
-        help="Data source: 'live' (USB Serial) or 'sim' (playback .npz file)",
+        "--source", choices=["live", "sim"], default="live",
+        help="Data source: 'live' (USB Serial, default) or 'sim' (playback .npz file)",
     )
     parser.add_argument(
         "--file", default="test_2.npz",
@@ -234,8 +304,8 @@ def main() -> None:
         help="DSP mode: 'amplitude' (default, recommended for ESP32) or 'phase'",
     )
     parser.add_argument(
-        "--window", type=float, default=18.0,
-        help="Sliding buffer window size in seconds (default: 18.0)",
+        "--window", type=float, default=20.0,
+        help="Sliding buffer window size in seconds (default: 20.0)",
     )
     args = parser.parse_args()
 

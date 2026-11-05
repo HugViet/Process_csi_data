@@ -30,8 +30,9 @@ DEFAULT_BREATH_LOW_HZ = 0.1
 DEFAULT_BREATH_HIGH_HZ = 0.75
 
 # Energy & SNR thresholds for Apnea / Breath-holding detection
-DEFAULT_MIN_VARIANCE = 0.01
-DEFAULT_MIN_SNR = 1.8
+DEFAULT_MIN_VARIANCE = 0.005
+DEFAULT_MIN_SNR = 1.35
+DEFAULT_MIN_PEAK_DISTANCE_SEC = 1.8
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +114,7 @@ def estimate_breathing_rate_fft(
         }
 
     # Detect candidate peaks in PSD band
-    peaks, _ = find_peaks(band_psd, prominence=max(0.12 * peak_psd, 1e-9))
+    peaks, _ = find_peaks(band_psd, prominence=max(0.08 * peak_psd, 1e-9))
     if len(peaks) == 0:
         dominant_idx = int(np.argmax(band_psd))
         dominant_freq = float(band_freqs[dominant_idx])
@@ -122,14 +123,15 @@ def estimate_breathing_rate_fft(
         sorted_indices = peaks[np.argsort(band_psd[peaks])[::-1]]
         dominant_freq = float(band_freqs[sorted_indices[0]])
 
-        # Harmonic suppression: If primary peak is f2 (e.g. 26 BPM), check if there is
-        # a fundamental f1 ~ f2 / 2 (e.g. 13 BPM) that has significant energy (>= 30% of peak)
-        for cand_idx in sorted_indices[1:]:
-            cand_freq = float(band_freqs[cand_idx])
-            ratio = dominant_freq / cand_freq
-            if 1.75 <= ratio <= 2.25 and band_psd[cand_idx] >= 0.30 * peak_psd:
-                dominant_freq = cand_freq
-                break
+        # Harmonic suppression: Only suppress if primary peak is in the high harmonic zone (>= 25 BPM)
+        # AND there is an actual candidate peak near f/2 (e.g. 13-15 BPM) with significant power (>= 28% of peak)
+        if dominant_freq >= (25.0 / 60.0):
+            for cand_idx in sorted_indices[1:]:
+                cand_freq = float(band_freqs[cand_idx])
+                ratio = dominant_freq / cand_freq
+                if 1.80 <= ratio <= 2.20 and band_psd[cand_idx] >= 0.28 * peak_psd:
+                    dominant_freq = cand_freq
+                    break
 
     fft_bpm = dominant_freq * 60.0
 
@@ -154,7 +156,7 @@ def estimate_breathing_rate_peaks(
     min_std_mult: float = 0.25,
     max_std_mult: float = 4.0,
     window_sec: float = 3.0,
-    min_peak_distance_sec: float = 1.0,
+    min_peak_distance_sec: float = DEFAULT_MIN_PEAK_DISTANCE_SEC,
     min_variance: float = DEFAULT_MIN_VARIANCE,
 ) -> dict[str, float | str | NDArray[np.int64]]:
     """Estimate breathing rate using global peak finding and dynamic energy gates.
@@ -171,7 +173,7 @@ def estimate_breathing_rate_peaks(
         Half-window (seconds) around each peak for local P2P calculation.
     min_peak_distance_sec : float
         Minimum distance between consecutive peaks in seconds.
-        Default 1.0s → supports rates up to 60 BPM (capturing rapid breathing).
+        Default 1.8s prevents intra-breath double-peaking (inhalation vs exhalation).
     min_variance : float
         Minimum signal variance; below this, Apnea is declared.
     """
@@ -200,9 +202,9 @@ def estimate_breathing_rate_peaks(
     p2p_max_threshold = max_std_mult * signal_std
 
     # Absolute prominence floor prevents triggering on flat baseline noise
-    prominence = max(PROMINENCE_STD_FRACTION * signal_std, 0.04)
+    prominence = max(0.35 * signal_std, 0.03)
 
-    # Minimum distance between peaks: default 1.0s corresponds to 60 BPM
+    # Minimum distance between peaks: default 1.8s corresponds to ~33 BPM
     minimum_peak_distance = max(1, int(fs * min_peak_distance_sec))
     all_peaks, _ = find_peaks(
         signal,
@@ -225,7 +227,7 @@ def estimate_breathing_rate_peaks(
     peaks = np.asarray(valid_peaks, dtype=np.int64)
     if peaks.size >= 2:
         ibi_seconds = np.diff(peaks).astype(np.float64) / fs
-        valid_ibis = ibi_seconds[(ibi_seconds >= 0.8) & (ibi_seconds <= MAX_IBI_SECONDS)]
+        valid_ibis = ibi_seconds[(ibi_seconds >= 1.5) & (ibi_seconds <= MAX_IBI_SECONDS)]
         median_ibi = float(np.median(valid_ibis)) if valid_ibis.size else 0.0
         peak_bpm = float(60.0 / median_ibi) if median_ibi > 0 else 0.0
     else:
@@ -248,7 +250,7 @@ def estimate_breathing_rate(
     min_std_mult: float = 0.25,
     max_std_mult: float = 4.0,
     window_sec: float = 3.0,
-    min_peak_distance_sec: float = 1.0,
+    min_peak_distance_sec: float = DEFAULT_MIN_PEAK_DISTANCE_SEC,
     fft_window_seconds: float = 15.0,
     min_variance: float = DEFAULT_MIN_VARIANCE,
     min_snr: float = DEFAULT_MIN_SNR,
@@ -289,19 +291,18 @@ def estimate_breathing_rate(
         combined["bpm"] = 0.0
         combined["status"] = "Apnea"
     elif f_bpm > 0 and p_bpm > 0:
-        # If both methods provide values, check agreement
         diff = abs(f_bpm - p_bpm)
         if diff <= 4.0:
-            # Strong agreement: smooth blend (60% FFT, 40% Peaks)
-            combined["bpm"] = float(0.6 * f_bpm + 0.4 * p_bpm)
-        elif 1.8 <= (p_bpm / f_bpm) <= 2.2:
+            # Strong agreement: smooth blend (65% FFT, 35% Peaks)
+            combined["bpm"] = float(0.65 * f_bpm + 0.35 * p_bpm)
+        elif 1.75 <= (p_bpm / f_bpm) <= 2.25:
             # Peak finder caught second harmonic: trust fundamental FFT
             combined["bpm"] = f_bpm
-        elif 1.8 <= (f_bpm / p_bpm) <= 2.2:
+        elif 1.75 <= (f_bpm / p_bpm) <= 2.25:
             # FFT caught harmonic: trust peak finder fundamental
             combined["bpm"] = p_bpm
         else:
-            # Prefer FFT as primary robust metric
+            # FFT has better frequency stability over whole window
             combined["bpm"] = f_bpm
         combined["status"] = "Breathing"
     elif f_bpm > 0:

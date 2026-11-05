@@ -45,11 +45,11 @@ def sanitize_phase(
 
     n_samples, n_subs = phase.shape
 
-    # Step 1: Temporal unwrap per subcarrier (fix 2π jumps along time axis).
-    unwrapped = np.unwrap(phase, axis=0)
-
-    # Step 2: Spatial unwrap per packet (fix 2π jumps across subcarriers).
-    unwrapped = np.unwrap(unwrapped, axis=1)
+    # Step 1+2: Spatial unwrap per packet (fix 2π jumps across subcarriers).
+    # NOTE: temporal unwrap must NOT be applied to raw phase first - every
+    # packet carries a random CFO/STO offset, so raw phase is uncorrelated in
+    # time until the per-packet linear trend has been removed below.
+    unwrapped = np.unwrap(phase, axis=1)
 
     # Step 3: Build the x-axis for the linear fit.
     if subcarrier_indices is not None:

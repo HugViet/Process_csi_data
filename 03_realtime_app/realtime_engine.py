@@ -16,11 +16,21 @@ from numpy.typing import NDArray
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "02_phasebeat_dsp"))
+sys.path.insert(0, str(PROJECT_ROOT / "04_ai_model"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config.settings import RAW_DATA_DIR
 from phasebeat_core import PhaseBeatCore
 from estimation.breathing_estimator import estimate_breathing_rate
+from respiration_pipeline import process_window, resample_uniform
+
+try:
+    from inference import CSIRespirationAIInference
+except ImportError:
+    try:
+        from .inference import CSIRespirationAIInference
+    except Exception:
+        CSIRespirationAIInference = None
 
 try:
     from .stream_source import CSIStreamSource
@@ -49,6 +59,10 @@ class RealtimeSnapshot:
     variance: float = 0.0
     snr: float = 0.0
     recorded_packets: int = 0
+    ai_class: str = "unknown"
+    ai_confidence: float = 0.0
+    ai_bpm: float = 0.0
+    ai_probs: dict[str, float] | None = None
 
 
 class RealtimeEngine:
@@ -57,9 +71,9 @@ class RealtimeEngine:
     def __init__(
         self,
         source: CSIStreamSource,
-        window_size_sec: float = 18.0,
+        window_size_sec: float = 20.0,
         mode: str = "amplitude",
-        min_window_sec: float = 4.0,
+        min_window_sec: float = 10.0,
     ) -> None:
         self.source = source
         self.window_size_sec = float(window_size_sec)
@@ -80,8 +94,11 @@ class RealtimeEngine:
         self._active_subcarrier: int | None = None
         self._subcarrier_auto_select = True
 
-        # BPM smoothing history
+        # BPM smoothing & state machine
         self._bpm_history: Deque[float] = deque(maxlen=5)
+        self._apnea_counter = 0
+        self._current_status = "Breathing"
+        self._last_valid_bpm = 0.0
 
         # Recording session management
         self._is_recording = False
@@ -89,6 +106,14 @@ class RealtimeEngine:
         self._rec_amps: List[NDArray[np.float64]] = []
         self._rec_phases: List[NDArray[np.float64]] = []
         self._rec_times: List[float] = []
+
+        # AI Respiration Inference Engine
+        self.ai_inference: Optional[Any] = None
+        if CSIRespirationAIInference is not None:
+            try:
+                self.ai_inference = CSIRespirationAIInference()
+            except Exception as exc:
+                print(f"[!] Warning: Failed to init AI Inference: {exc}")
 
         # Last snapshot
         self._last_snapshot: RealtimeSnapshot | None = None
@@ -216,62 +241,119 @@ class RealtimeEngine:
             return None
 
         try:
-            core = PhaseBeatCore(fs=fs, lowcut=0.1, highcut=0.75, mode=self.mode)
-
-            # Subcarrier locking: lock chosen subcarrier so waveform shape doesn't constantly morph
-            target_sc = self._active_subcarrier if not self._subcarrier_auto_select else self._active_subcarrier
-            clean_signal = core.process(amps, phases=phases, subcarrier=target_sc)
-            selected_sc = core.last_selected_subcarrier if core.last_selected_subcarrier is not None else 0
-
-            # If auto-select is enabled and no subcarrier was locked yet, lock to the chosen one
-            if self._subcarrier_auto_select and self._active_subcarrier is None:
-                self._active_subcarrier = selected_sc
-
-            # Robust breathing rate estimation
-            # min_peak_distance_sec=1.0 allows detecting up to 60 BPM without period-doubling / peak-skipping
-            est = estimate_breathing_rate(
-                clean_signal,
-                fs=fs,
-                min_std_mult=0.25,
-                max_std_mult=4.0,
-                window_sec=3.0,
-                min_peak_distance_sec=1.0,
-                fft_window_seconds=15.0,
-                min_variance=0.015,
-                min_snr=1.8,
+            target_fs = 90.0
+            uniform_times, (uniform_amps, uniform_phases) = resample_uniform(
+                times, amps, phases, fs=target_fs
             )
 
-            status = str(est["status"])
-            raw_bpm = float(est["bpm"])
+            # AI Model Inference on uniformly resampled 90 Hz window (16.0s online-consistent slice)
+            ai_class = "unknown"
+            ai_conf = 0.0
+            ai_bpm = 0.0
+            ai_probs: dict[str, float] = {}
 
-            # Temporal smoothing for displayed BPM to eliminate jumping
-            if status == "Breathing" and raw_bpm > 0:
-                self._bpm_history.append(raw_bpm)
-                smoothed_bpm = float(np.median(self._bpm_history))
+            if self.ai_inference is not None and self.ai_inference.is_ready:
+                ai_res = self.ai_inference.predict_window(uniform_amps, current_fs=target_fs)
+                ai_class = ai_res.get("class_name", "unknown")
+                ai_conf = float(ai_res.get("confidence", 0.0))
+                ai_bpm = float(ai_res.get("pred_bpm", 0.0))
+                ai_probs = ai_res.get("probabilities", {})
+
+            if self.mode == "amplitude" and self._subcarrier_auto_select:
+                # Multi-subcarrier AGC-normalized PCA fusion + Parabolic Periodogram / ACF
+                res = process_window(uniform_amps, fs=target_fs)
+                clean_signal = res.waveform
+                selected_sc = int(res.component + 1)  # PC1..PC3
+                snr = float(res.snr)
+                acf_peak = float(res.acf_peak)
+                raw_bpm = float(res.bpm)
+                fft_bpm = float(res.spec_bpm)
+                peak_bpm = float(res.acf_bpm)
+                fft_freqs = res.freqs
+                fft_psd = res.psd
+                dominant_freq = float(res.dominant_freq)
+                peaks_indices = res.peaks_indices
+
+                # Calibrated Apnea detection: combines AI classifier with low-periodicity DSP guard
+                dsp_is_apnea = (snr < 5.5 and acf_peak < 0.20)
+                ai_is_apnea = (ai_class == "apnea" and ai_conf >= 0.55)
+                raw_is_apnea = dsp_is_apnea or ai_is_apnea
             else:
-                self._bpm_history.clear()
-                smoothed_bpm = 0.0
+                core = PhaseBeatCore(fs=target_fs, lowcut=0.1, highcut=0.75, mode=self.mode)
+                target_sc = None if self._subcarrier_auto_select else self._active_subcarrier
+                clean_signal = core.process(uniform_amps, phases=uniform_phases, subcarrier=target_sc)
+                selected_sc = core.last_selected_subcarrier if core.last_selected_subcarrier is not None else (target_sc or 0)
+                eff_min_var = 0.005 if self.mode == "amplitude" else 0.0001
+                est = estimate_breathing_rate(
+                    clean_signal,
+                    fs=target_fs,
+                    min_std_mult=0.25,
+                    max_std_mult=4.0,
+                    window_sec=3.0,
+                    min_peak_distance_sec=1.8,
+                    fft_window_seconds=15.0,
+                    min_variance=eff_min_var,
+                    min_snr=1.35,
+                )
+                snr = float(est.get("snr", 0.0))
+                raw_bpm = float(est["bpm"])
+                fft_bpm = float(est["fft_bpm"])
+                peak_bpm = float(est["peak_bpm"])
+                fft_freqs = np.asarray(est["fft_freqs"], dtype=np.float64)
+                fft_psd = np.asarray(est["fft_psd"], dtype=np.float64)
+                dominant_freq = float(est["fft_dominant_freq"])
+                peaks_indices = np.asarray(est["peaks_indices"], dtype=np.int64)
+                raw_is_apnea = (str(est["status"]) == "Apnea") or (ai_class == "apnea" and ai_conf >= 0.65)
 
-            time_axis = times - times[0]
+            # Apnea debounce: require >= 3 consecutive frames (~1s) to confirm Apnea
+            if raw_is_apnea:
+                self._apnea_counter += 1
+                if self._apnea_counter >= 3:
+                    status = "Apnea"
+                    self._current_status = "Apnea"
+                    smoothed_bpm = 0.0
+                    self._bpm_history.clear()
+                    self._last_valid_bpm = 0.0
+                else:
+                    status = self._current_status
+                    smoothed_bpm = float(np.median(self._bpm_history)) if self._bpm_history else self._last_valid_bpm
+            else:
+                self._apnea_counter = max(0, self._apnea_counter - 1)
+                status = "Breathing"
+                self._current_status = "Breathing"
+
+                cand_bpm = raw_bpm
+                if cand_bpm > 0:
+                    self._bpm_history.append(cand_bpm)
+                    smoothed_bpm = float(np.median(self._bpm_history))
+                    self._last_valid_bpm = smoothed_bpm
+                else:
+                    smoothed_bpm = self._last_valid_bpm
+
+            time_axis = uniform_times - uniform_times[0]
             snapshot = RealtimeSnapshot(
                 time_axis=time_axis,
                 clean_waveform=clean_signal,
                 selected_subcarrier=selected_sc,
-                peaks_indices=np.asarray(est["peaks_indices"], dtype=np.int64),
+                peaks_indices=peaks_indices,
                 bpm=smoothed_bpm,
-                peak_bpm=float(est["peak_bpm"]),
-                fft_bpm=float(est["fft_bpm"]),
+                peak_bpm=peak_bpm,
+                fft_bpm=fft_bpm,
                 status=status,
-                fft_freqs=np.asarray(est["fft_freqs"], dtype=np.float64),
-                fft_psd=np.asarray(est["fft_psd"], dtype=np.float64),
-                dominant_freq=float(est["fft_dominant_freq"]),
+                fft_freqs=fft_freqs,
+                fft_psd=fft_psd,
+                dominant_freq=dominant_freq,
                 fs=fs,
                 total_packets=total_pkts,
                 is_recording=is_rec,
                 mode=self.mode,
                 variance=float(np.var(clean_signal)),
-                snr=float(est.get("snr", 0.0)),
+                snr=snr,
                 recorded_packets=rec_count,
+                ai_class=ai_class,
+                ai_confidence=ai_conf,
+                ai_bpm=ai_bpm,
+                ai_probs=ai_probs,
             )
             self._last_snapshot = snapshot
             return snapshot

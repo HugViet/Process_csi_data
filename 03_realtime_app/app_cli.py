@@ -22,11 +22,11 @@ except ImportError:
 
 
 def run_cli(
-    source_type: str = "sim",
+    source_type: str = "live",
     file_name: str = "test_2.npz",
     port: str = SERIAL_PORT,
-    mode: str = "phase",
-    duration: float = 10.0,
+    mode: str = "amplitude",
+    duration: float = 0.0,
 ) -> None:
     """Run CLI realtime monitor for a given duration (or until Ctrl+C)."""
     if source_type == "live":
@@ -69,7 +69,7 @@ def run_cli(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Terminal CLI Realtime Monitor")
-    parser.add_argument("--source", choices=["live", "sim"], default="sim", help="Data source")
+    parser.add_argument("--source", choices=["live", "sim"], default="live", help="Data source: 'live' (default) or 'sim'")
     parser.add_argument("--file", default="test_2.npz", help="Simulation file")
     parser.add_argument("--port", default=SERIAL_PORT, help="Serial port")
     parser.add_argument("--mode", choices=["phase", "amplitude"], default="amplitude", help="DSP mode (default: amplitude)")
